@@ -27,13 +27,15 @@
 | Framework | Flutter + Dart | Latest stable |
 | State Management | Provider | ^6.1.2 |
 | Navigation | GoRouter | ^14.0.0 |
-| Local Storage | sqflite | ^2.3.3 |
+| Local Storage (Offline Cache) | Hive + hive_flutter | ^2.2.3 |
 | Cloud Database | Firebase Firestore | ^5.0.0 |
 | Deployment | Firebase Hosting | — |
 | GPS | geolocator | ^12.0.0 |
 | QR Scanner | mobile_scanner | ^5.0.0 |
 | Font | Plus Jakarta Sans (google_fonts) | ^6.2.1 |
 | ID Generation | uuid | ^4.4.0 |
+
+> ⚠️ SQLite (`sqflite`) has been removed. Do NOT use it anywhere.
 
 ---
 
@@ -42,30 +44,31 @@
 ```
 classpulse/
 ├── lib/
-│   ├── main.dart                         # App entry point, MultiProvider, MaterialApp.router
+│   ├── main.dart                         # App entry point, Hive.initFlutter(), MultiProvider, MaterialApp.router
 │   ├── core/
 │   │   ├── theme/
-│   │   │   ├── app_theme.dart            # ThemeData (lightTheme only)
-│   │   │   ├── app_colors.dart           # AppColors constants
-│   │   │   ├── app_text_styles.dart      # AppTextStyles
-│   │   │   ├── app_spacing.dart          # AppSpacing constants
-│   │   │   └── app_radius.dart           # AppRadius constants
+│   │   │   ├── app_theme.dart
+│   │   │   ├── app_colors.dart
+│   │   │   ├── app_text_styles.dart
+│   │   │   ├── app_spacing.dart
+│   │   │   └── app_radius.dart
 │   │   ├── router/
-│   │   │   ├── app_router.dart           # GoRouter config
-│   │   │   └── app_routes.dart           # AppRoutes enum
+│   │   │   ├── app_router.dart
+│   │   │   └── app_routes.dart
 │   │   ├── providers/
-│   │   │   └── check_in_notifier.dart    # ONLY global ChangeNotifier
+│   │   │   └── check_in_notifier.dart
 │   │   └── enums/
-│   │       └── check_in_status.dart      # CheckInStatus enum
+│   │       └── check_in_status.dart
 │   ├── models/
-│   │   ├── check_in_record.dart          # CheckInRecord + fromJson/toJson/copyWith
-│   │   ├── mood_option.dart              # MoodOption + static list
-│   │   └── gps_location.dart             # GpsLocation value object
+│   │   ├── check_in_record.dart
+│   │   ├── mood_option.dart
+│   │   └── gps_location.dart
 │   ├── services/
 │   │   ├── location_service.dart         # GPS — geolocator
 │   │   ├── qr_service.dart               # QR parsing — mobile_scanner
-│   │   ├── checkin_service.dart          # SQLite + Firestore operations
-│   │   └── database_helper.dart          # SQLite singleton
+│   │   ├── session_service.dart          # Firestore sessions READ ONLY
+│   │   ├── checkin_service.dart          # Hive cache + Firestore source of truth
+│   │   └── hive_helper.dart              # Hive box singleton (replaces DatabaseHelper)
 │   ├── features/
 │   │   ├── splash/
 │   │   │   └── splash_screen.dart
@@ -83,7 +86,7 @@ classpulse/
 │           ├── mood_selector.dart
 │           ├── step_section_label.dart
 │           └── status_indicator.dart
-├── docs/                                 # AI context documents (this folder)
+├── docs/
 │   ├── ARCHITECTURE.md                   # ← You are here
 │   ├── DATA_MODELS.md
 │   ├── THEME.md
@@ -100,33 +103,56 @@ classpulse/
 ## 4. Layered Architecture
 
 ```
-┌────────────────────────────────────────└
-│              UI LAYER                    │
-│   Screens + Atoms (features/, shared/)   │
-│   → NO business logic here               │
-│   → Only calls notifier or local state   │
+┌────────────────────────────────────────┐
+│              UI LAYER                  │
+│   Screens + Atoms (features/, shared/) │
+│   → NO business logic here             │
+│   → Only calls notifier or local state │
 ├────────────────────────────────────────┤
-│           STATE LAYER                    │
-│   CheckInNotifier (core/providers/)      │
-│   → Bridges UI and Services              │
-│   → Holds currentRecord + sessionHistory │
+│           STATE LAYER                  │
+│   CheckInNotifier (core/providers/)    │
+│   → Bridges UI and Services            │
+│   → Holds currentRecord + history      │
 ├────────────────────────────────────────┤
-│          SERVICE LAYER                   │
-│   LocationService, QRService,            │
-│   CheckInService (services/)             │
-│   → All business logic lives here        │
-│   → No Flutter widgets                  │
+│          SERVICE LAYER                 │
+│   LocationService, QRService,          │
+│   SessionService, CheckInService       │
+│   → All business logic lives here      │
+│   → No Flutter widgets                 │
 ├────────────────────────────────────────┤
-│           DATA LAYER                     │
-│   SQLite (DatabaseHelper) + Firestore    │
-│   → SQLite = source of truth for UI      │
-│   → Firestore = cloud backup only        │
+│           DATA LAYER                   │
+│   Firestore = source of truth          │
+│     • sessions collection (READ ONLY)  │
+│     • checkins collection (READ/WRITE) │
+│   Hive = offline cache only            │
+│     • Falls back when offline          │
 └────────────────────────────────────────┘
 ```
 
 ---
 
-## 5. Key Architectural Rules
+## 5. Data Flow: Sessions & Check-in History
+
+```
+App starts
+    │
+    ▼
+SessionService.getSession(sessionId)
+    └── reads from Firestore sessions collection
+            └── sessions are mock data seeded manually (READ ONLY)
+
+CheckInService.getAllRecords()
+    └── tries Firestore checkins collection first
+            └── on failure / offline → falls back to Hive local cache
+
+CheckInService.saveCheckIn() / saveCheckOut()
+    └── saves to Hive first (immediate, offline-safe)
+            └── then syncs to Firestore (fire-and-forget)
+```
+
+---
+
+## 6. Key Architectural Rules
 
 | Rule | Source |
 |------|--------|
@@ -134,27 +160,30 @@ classpulse/
 | Use `context.go()` exclusively — no `Navigator.push()` | NAVIGATION.md |
 | Use `AppColors`, `AppTextStyles`, `AppSpacing`, `AppRadius` — no hardcoded values | THEME.md |
 | `CheckInNotifier` is the ONLY global ChangeNotifier | STATE.md |
-| SQLite is source of truth — Firestore is fire-and-forget backup | SERVICES.md |
+| Firestore is source of truth — Hive is offline fallback cache | SERVICES.md |
 | No bottom navigation bar | SCREENS.md |
-| Always `.timeout(Duration(seconds: 10))` on GPS calls | Week 6 Elevator Test |
+| Always `.timeout(Duration(seconds: 10))` on GPS and Firestore calls | Week 6 |
 | All model classes have `fromJson`, `toJson`, `copyWith` | DATA_MODELS.md |
+| Never use `sqflite` or `DatabaseHelper` — they are removed | This file |
+| `sessions` collection is READ ONLY — never write to it from the app | SERVICES.md |
 
 ---
 
-## 6. Reference Index
+## 7. Firestore Collections (Mock Data)
 
-| File | Read When |
-|------|-----------|
-| `DATA_MODELS.md` | Creating any Dart model class or Firestore/SQLite schema |
-| `THEME.md` | Writing any widget with color, font, padding, or radius |
-| `NAVIGATION.md` | Setting up routing or any `context.go()` call |
-| `SCREENS.md` | Building any screen or atom widget |
-| `SERVICES.md` | Implementing LocationService, QRService, or CheckInService |
-| `STATE.md` | Writing CheckInNotifier, Provider setup, or screen state |
+### `sessions` — READ ONLY
+Seeded manually. One document: `MAD-W07-2026`
+
+### `checkins` — READ/WRITE
+Mock documents seeded manually for demo:
+- `mock-checkin-001` (2026-03-06, Backend Integration)
+- `mock-checkin-002` (2026-02-27, AI Tools for Mobile)
+
+New check-ins written by app during live demo.
 
 ---
 
-## 7. pubspec.yaml Dependencies
+## 8. pubspec.yaml Dependencies
 
 ```yaml
 name: classpulse
@@ -178,11 +207,10 @@ dependencies:
   # Firebase
   firebase_core: ^3.0.0
   cloud_firestore: ^5.0.0
-  firebase_hosting: # via CLI only
 
-  # Local Storage
-  sqflite: ^2.3.3
-  path: ^1.9.0
+  # Local Storage (Offline Cache)
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
 
   # GPS
   geolocator: ^12.0.0
@@ -204,35 +232,41 @@ dev_dependencies:
 
 ---
 
-## 8. Build Order for AI
-
-Follow this sequence when generating code. Do NOT skip steps.
+## 9. Build Order for AI
 
 ```
-Step 1 → core/theme/         (AppColors, AppTextStyles, AppSpacing, AppRadius, AppTheme)
-Step 2 → core/enums/         (CheckInStatus)
-Step 3 → models/             (GpsLocation, MoodOption, CheckInRecord)
-Step 4 → core/router/        (AppRoutes, appRouter)
-Step 5 → services/           (DatabaseHelper, LocationService, QRService, CheckInService)
-Step 6 → core/providers/     (CheckInNotifier)
-Step 7 → main.dart           (MultiProvider + MaterialApp.router)
-Step 8 → shared/widgets/     (MoodSelector, StepSectionLabel, StatusIndicator)
-Step 9 → features/splash/    (SplashScreen)
-Step 10 → features/home/     (StatusCard, SessionHistoryItem, HomeScreen)
-Step 11 → features/checkin/  (CheckInScreen)
-Step 12 → features/checkout/ (FinishClassScreen)
+Step 1  → core/theme/         (AppColors, AppTextStyles, AppSpacing, AppRadius, AppTheme)
+Step 2  → core/enums/         (CheckInStatus)
+Step 3  → models/             (GpsLocation, MoodOption, CheckInRecord)
+Step 4  → core/router/        (AppRoutes, appRouter)
+Step 5  → services/hive_helper.dart       (Hive box singleton)
+Step 6  → services/location_service.dart
+Step 7  → services/qr_service.dart
+Step 8  → services/session_service.dart   (Firestore READ ONLY)
+Step 9  → services/checkin_service.dart   (Hive + Firestore)
+Step 10 → core/providers/check_in_notifier.dart
+Step 11 → main.dart           (Hive.initFlutter() + MultiProvider + MaterialApp.router)
+Step 12 → shared/widgets/
+Step 13 → features/splash/
+Step 14 → features/home/
+Step 15 → features/checkin/
+Step 16 → features/checkout/
 ```
 
 ---
 
 ## AI Hallucination Warnings
 
+> ⚠️ Do NOT use `sqflite`, `DatabaseHelper`, or any SQLite-related code. It is removed.
+
 > ⚠️ Do NOT create files outside the folder structure defined in Section 3.
 
-> ⚠️ Do NOT add authentication, login screens, or user registration — there is NO auth in this app.
+> ⚠️ Do NOT add authentication, login screens, or user registration.
 
 > ⚠️ Do NOT add a bottom navigation bar.
 
-> ⚠️ Do NOT install packages not listed in Section 7. Verify every package on pub.dev before using.
+> ⚠️ Do NOT install packages not listed in Section 8.
 
-> ⚠️ Do NOT write code beyond Step 12 until all previous steps are verified working.
+> ⚠️ Do NOT write to the `sessions` collection. It is READ ONLY.
+
+> ⚠️ Always call `Hive.initFlutter()` in `main()` before `runApp()`.
