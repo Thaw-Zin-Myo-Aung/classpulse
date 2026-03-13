@@ -4,10 +4,9 @@ import 'package:classpulse/services/checkin_service.dart';
 import 'package:flutter/material.dart';
 
 class CheckInNotifier extends ChangeNotifier {
-  final CheckInService _service;
+  CheckInService? _service;
 
-  CheckInNotifier({CheckInService? service})
-      : _service = service ?? CheckInService();
+  CheckInNotifier({CheckInService? service}) : _service = service;
 
   CheckInRecord? _currentRecord;
   List<CheckInRecord> _sessionHistory = [];
@@ -21,10 +20,17 @@ class CheckInNotifier extends ChangeNotifier {
 
   CheckInStatus? get currentStatus => _currentRecord?.status;
 
+  CheckInService _getServiceSync() {
+    return _service ??= CheckInService();
+  }
+
   Future<void> loadHistory() async {
     _setLoading(true);
     try {
-      _sessionHistory = await _service.getAllRecords();
+      final all = await _getServiceSync().getAllRecords();
+      _sessionHistory = all
+          .where((r) => r.status == CheckInStatus.completed)
+          .toList(growable: false);
       _errorMessage = null;
     } catch (e) {
       _errorMessage = 'Failed to load session history.';
@@ -44,7 +50,7 @@ class CheckInNotifier extends ChangeNotifier {
   }) async {
     _setLoading(true);
     try {
-      _currentRecord = await _service.saveCheckIn(
+      _currentRecord = await _getServiceSync().saveCheckIn(
         studentId: studentId,
         sessionId: sessionId,
         checkInLat: checkInLat,
@@ -71,7 +77,7 @@ class CheckInNotifier extends ChangeNotifier {
 
     _setLoading(true);
     try {
-      final completed = await _service.saveCheckOut(
+      final completed = await _getServiceSync().saveCheckOut(
         currentRecord: _currentRecord!,
         checkOutLat: checkOutLat,
         checkOutLng: checkOutLng,
@@ -98,4 +104,3 @@ class CheckInNotifier extends ChangeNotifier {
     notifyListeners();
   }
 }
-

@@ -1,17 +1,17 @@
 import 'package:classpulse/core/enums/check_in_status.dart';
 import 'package:classpulse/models/check_in_record.dart';
-import 'package:classpulse/services/database_helper.dart';
+import 'package:classpulse/services/hive_helper.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
 class CheckInService {
-  final DatabaseHelper _db;
   final FirebaseFirestore _firestore;
+  final HiveHelper _cache;
 
-  CheckInService({DatabaseHelper? db, FirebaseFirestore? firestore})
-      : _db = db ?? DatabaseHelper.instance,
-        _firestore = firestore ?? FirebaseFirestore.instance;
+  CheckInService({FirebaseFirestore? firestore, HiveHelper? cache})
+      : _firestore = firestore ?? FirebaseFirestore.instance,
+        _cache = cache ?? HiveHelper.instance();
 
   Future<CheckInRecord> saveCheckIn({
     required String studentId,
@@ -35,7 +35,7 @@ class CheckInService {
       status: CheckInStatus.checkedIn,
     );
 
-    await _db.insertRecord(record);
+    await _cache.saveRecord(record);
     _syncToFirestore(record);
     return record;
   }
@@ -56,13 +56,53 @@ class CheckInService {
       classFeedback: classFeedback,
     );
 
-    await _db.updateRecord(updated);
+    await _cache.updateRecord(updated);
     _syncToFirestore(updated);
     return updated;
   }
 
   Future<List<CheckInRecord>> getAllRecords() async {
-    return _db.getAllRecords();
+    try {
+      final snap = await _firestore
+          .collection('checkins')
+          .orderBy('checkInTime', descending: true)
+          .get()
+          .timeout(const Duration(seconds: 10));
+
+      final records = snap.docs
+          .map((d) => _normalizeFirestoreJson(d.data()))
+          .map(CheckInRecord.fromJson)
+          .toList();
+
+      for (final r in records) {
+        try {
+          await _cache.saveRecord(r);
+        } catch (_) {
+          // Cache failures are non-fatal.
+        }
+      }
+
+      return records;
+    } catch (e) {
+      debugPrint('Firestore history load failed, using cache: $e');
+      return _cache.getAllRecords();
+    }
+  }
+
+  Map<String, dynamic> _normalizeFirestoreJson(Map<String, dynamic> json) {
+    final mapped = Map<String, dynamic>.from(json);
+
+    final checkInTime = mapped['checkInTime'];
+    if (checkInTime is Timestamp) {
+      mapped['checkInTime'] = checkInTime.toDate().toIso8601String();
+    }
+
+    final checkOutTime = mapped['checkOutTime'];
+    if (checkOutTime is Timestamp) {
+      mapped['checkOutTime'] = checkOutTime.toDate().toIso8601String();
+    }
+
+    return mapped;
   }
 
   void _syncToFirestore(CheckInRecord record) {
@@ -76,4 +116,3 @@ class CheckInService {
     });
   }
 }
-
