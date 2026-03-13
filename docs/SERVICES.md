@@ -17,12 +17,43 @@ UI Screen
 Service Layer          ← This file defines everything here
     ├── LocationService   (GPS)
     ├── QRService         (Camera + QR parsing)
+    ├── SessionService    (Firestore session lookup)
     └── CheckInService    (SQLite + Firestore)
          │
          ▼  persists to
     ├── SQLite (offline-first)
     └── Firestore (cloud sync)
 ```
+
+---
+
+## 0. Firestore Seed Data (Manual Setup Required)
+
+> **Developer Instruction:** Before running the app, manually create the following
+> in Firebase Console → Firestore → Start collection.
+> This is static mock data. It does NOT change during the exam.
+
+### Collection: `sessions`
+
+Create one document with ID: `MAD-W07-2026`
+
+| Field | Type | Value |
+|-------|------|-------|
+| `sessionId` | string | `MAD-W07-2026` |
+| `courseName` | string | `Mobile Application Development` |
+| `instructor` | string | `Vittayasak Rujivorakul` |
+| `date` | string | `2026-03-13` |
+| `room` | string | `S3-407` |
+
+### Collection: `checkins`
+> **Auto-created** by the app on first check-in submission. Do NOT create manually.
+
+### QR Code for Demo
+Generate a QR code at [qr-code-generator.com](https://www.qr-code-generator.com) with this exact text:
+```
+CLASSPULSE-MAD-W07-2026
+```
+Print or display on screen to scan during demo.
 
 ---
 
@@ -81,7 +112,7 @@ class LocationException implements Exception {
   const LocationException(this.message);
   
   @override
-  String toString() => 'LocationException: $message';
+  String toString() => 'LocationException: \$message';
 }
 ```
 
@@ -121,6 +152,7 @@ dependencies:
 - Open camera for QR scanning
 - Parse raw QR string to extract `sessionId`
 - Validate QR belongs to ClassPulse format
+- Provide mock QR fill for demo/debug purposes
 
 ### QR Code Format
 
@@ -154,6 +186,10 @@ class QRService {
     }
     return sessionId;
   }
+
+  /// Returns mock session ID for demo/debug without real QR scan.
+  /// ONLY use this for testing. Remove before production.
+  String getMockSessionId() => 'MAD-W07-2026';
 }
 
 /// Custom exception for QR errors
@@ -162,13 +198,11 @@ class QRException implements Exception {
   const QRException(this.message);
 
   @override
-  String toString() => 'QRException: $message';
+  String toString() => 'QRException: \$message';
 }
 ```
 
 ### QR Scanner Widget Integration
-
-The camera scanner is opened as an inline widget on the screen using `MobileScannerController`.
 
 ```dart
 // Usage in CheckInScreen / FinishClassScreen:
@@ -187,6 +221,24 @@ MobileScanner(
     }
   },
 );
+```
+
+### Mock QR Button (For Demo)
+> **AI Instruction:** Add a small **"Use Demo QR"** `TextButton` below the scanner area.
+> When tapped, it calls `qrService.getMockSessionId()` and sets `_sessionId` as if scanned.
+> Label it clearly as "Demo Mode" so the instructor knows it's intentional.
+
+```dart
+// In CheckInScreen and FinishClassScreen below the MobileScanner widget:
+TextButton.icon(
+  onPressed: () {
+    final mockId = QRService().getMockSessionId();
+    setState(() => _sessionId = mockId);
+  },
+  icon: const Icon(Icons.bug_report_outlined, size: 16),
+  label: const Text('Use Demo QR'),
+  style: TextButton.styleFrom(foregroundColor: AppColors.textSecondary),
+),
 ```
 
 ### Error States to Handle in UI
@@ -215,7 +267,58 @@ dependencies:
 
 ---
 
-## 3. CheckInService
+## 3. SessionService
+
+**File:** `lib/services/session_service.dart`  
+**Package:** `cloud_firestore: ^5.0.0`
+
+### Responsibility
+- Fetch session info from Firestore `sessions` collection by sessionId
+- Validates that a session exists before allowing check-in
+
+### Method Contract
+
+```dart
+class SessionService {
+  final FirebaseFirestore _firestore;
+
+  SessionService({FirebaseFirestore? firestore})
+      : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  /// Fetches session document from Firestore.
+  /// Returns session data map if found.
+  /// Throws [SessionException] if not found.
+  Future<Map<String, dynamic>> getSession(String sessionId) async {
+    try {
+      final doc = await _firestore
+          .collection('sessions')
+          .doc(sessionId)
+          .get()
+          .timeout(const Duration(seconds: 10));
+
+      if (!doc.exists || doc.data() == null) {
+        throw SessionException('Session not found: \$sessionId');
+      }
+      return doc.data()!;
+    } catch (e) {
+      if (e is SessionException) rethrow;
+      throw SessionException('Could not load session. Check your connection.');
+    }
+  }
+}
+
+class SessionException implements Exception {
+  final String message;
+  const SessionException(this.message);
+
+  @override
+  String toString() => 'SessionException: \$message';
+}
+```
+
+---
+
+## 4. CheckInService
 
 **File:** `lib/services/checkin_service.dart`  
 **Packages:** `sqflite: ^2.3.3`, `cloud_firestore: ^5.0.0`, `uuid: ^4.4.0`
@@ -240,14 +343,13 @@ User submits → Save to SQLite (immediate) → Save to Firestore (async, best-e
 
 ```dart
 class CheckInService {
-  final DatabaseHelper _db;         // SQLite helper
+  final DatabaseHelper _db;
   final FirebaseFirestore _firestore;
 
   CheckInService({DatabaseHelper? db, FirebaseFirestore? firestore})
       : _db = db ?? DatabaseHelper.instance,
         _firestore = firestore ?? FirebaseFirestore.instance;
 
-  /// Creates a new check-in record. Saves to SQLite first, then Firestore.
   Future<CheckInRecord> saveCheckIn({
     required String studentId,
     required String sessionId,
@@ -269,17 +371,11 @@ class CheckInService {
       moodBefore: moodBefore,
       status: CheckInStatus.checkedIn,
     );
-
-    // 1. Save to SQLite (primary)
     await _db.insertRecord(record);
-
-    // 2. Sync to Firestore (best-effort)
     _syncToFirestore(record);
-
     return record;
   }
 
-  /// Updates existing record with check-out data.
   Future<CheckInRecord> saveCheckOut({
     required CheckInRecord currentRecord,
     required double checkOutLat,
@@ -295,47 +391,30 @@ class CheckInService {
       learningSummary: learningSummary,
       classFeedback: classFeedback,
     );
-
-    // 1. Update SQLite (primary)
     await _db.updateRecord(updated);
-
-    // 2. Sync to Firestore (best-effort)
     _syncToFirestore(updated);
-
     return updated;
   }
 
-  /// Returns all completed sessions from SQLite (no network required).
   Future<List<CheckInRecord>> getAllRecords() async {
     return await _db.getAllRecords();
   }
 
-  /// Fire-and-forget Firestore sync. Errors are logged, not thrown.
   void _syncToFirestore(CheckInRecord record) {
     _firestore
         .collection('checkins')
         .doc(record.id)
         .set(record.toJson())
         .catchError((e) {
-      // Log error — do NOT rethrow
-      debugPrint('Firestore sync failed: $e');
+      debugPrint('Firestore sync failed: \$e');
     });
   }
 }
 ```
 
-### Required pubspec.yaml
-```yaml
-dependencies:
-  sqflite: ^2.3.3
-  path: ^1.9.0
-  cloud_firestore: ^5.0.0
-  uuid: ^4.4.0
-```
-
 ---
 
-## 4. DatabaseHelper (SQLite)
+## 5. DatabaseHelper (SQLite)
 
 **File:** `lib/services/database_helper.dart`
 
@@ -404,7 +483,7 @@ class DatabaseHelper {
 
 ## AI Hallucination Warnings
 
-> ⚠️ Do NOT call `LocationService` or `QRService` inside `build()` or button callbacks directly. Call via a method in the screen's state class.
+> ⚠️ Do NOT call `LocationService` or `QRService` inside `build()` or button callbacks directly.
 
 > ⚠️ Do NOT let Firestore errors crash the app. `_syncToFirestore()` is fire-and-forget.
 
@@ -414,4 +493,6 @@ class DatabaseHelper {
 
 > ⚠️ Do NOT read history from Firestore — always read from SQLite (`getAllRecords()`).
 
-> ⚠️ Always include `.timeout(Duration(seconds: 10))` on GPS calls — the Elevator Test (Week 6).
+> ⚠️ Always include `.timeout(Duration(seconds: 10))` on GPS and Firestore calls.
+
+> ⚠️ The `sessions` collection is READ ONLY from the app. Never write to it.
