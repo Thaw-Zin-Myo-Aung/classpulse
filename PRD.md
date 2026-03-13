@@ -145,9 +145,3 @@ AI tools (GitHub Copilot, Claude) will be used to:
 - Generate Flutter widget scaffolding and navigation boilerplate
 - Generate `fromJson`/`toJson` data models
 - Generate Service Layer templates
-
-The developer (architect) will:
-- Define all data structures and field names
-- Wire service calls to UI state
-- Validate GPS and QR logic manually
-- Handle error states and offline fallback
