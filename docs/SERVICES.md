@@ -15,27 +15,29 @@ UI Screen
     │
     ▼  calls
 Service Layer          ← This file defines everything here
-    ├── LocationService   (GPS)
-    ├── QRService         (Camera + QR parsing)
-    ├── SessionService    (Firestore session lookup)
-    └── CheckInService    (SQLite + Firestore)
+    ├── LocationService    (GPS)
+    ├── QRService          (Camera + QR parsing)
+    ├── SessionService     (Firestore sessions — READ ONLY)
+    ├── CheckInService     (Hive cache + Firestore source of truth)
+    └── HiveHelper         (Local offline box)
          │
          ▼  persists to
-    ├── SQLite (offline-first)
-    └── Firestore (cloud sync)
+    ├── Hive (offline cache — write first)
+    └── Firestore (source of truth — sync after)
 ```
+
+> ⚠️ SQLite (`sqflite`) and `DatabaseHelper` are REMOVED. Do NOT use them.
 
 ---
 
 ## 0. Firestore Seed Data (Manual Setup Required)
 
-> **Developer Instruction:** Before running the app, manually create the following
-> in Firebase Console → Firestore → Start collection.
-> This is static mock data. It does NOT change during the exam.
+> **Developer Instruction:** Before running the app, seed the following collections
+> via Firebase Console or `gcloud firestore documents create` in Cloud Shell.
 
-### Collection: `sessions`
+### Collection: `sessions` — READ ONLY
 
-Create one document with ID: `MAD-W07-2026`
+Document ID: `MAD-W07-2026`
 
 | Field | Type | Value |
 |-------|------|-------|
@@ -45,15 +47,53 @@ Create one document with ID: `MAD-W07-2026`
 | `date` | string | `2026-03-13` |
 | `room` | string | `S3-407` |
 
-### Collection: `checkins`
-> **Auto-created** by the app on first check-in submission. Do NOT create manually.
+### Collection: `checkins` — Mock Previous Sessions
+
+Document ID: `mock-checkin-001`
+
+| Field | Type | Value |
+|-------|------|-------|
+| `id` | string | `mock-checkin-001` |
+| `studentId` | string | `6731503088` |
+| `sessionId` | string | `MAD-W07-2026` |
+| `checkInTime` | string | `2026-03-06T09:00:00` |
+| `checkOutTime` | string | `2026-03-06T11:00:00` |
+| `previousTopic` | string | `Backend Integration` |
+| `expectedTopic` | string | `Service Layer Design` |
+| `learningSummary` | string | `Learned how to structure service layers` |
+| `classFeedback` | string | `Great class, very practical` |
+| `moodBefore` | number | `4` |
+| `checkInLat` | number | `20.0454` |
+| `checkInLng` | number | `99.8923` |
+| `checkOutLat` | number | `20.0454` |
+| `checkOutLng` | number | `99.8923` |
+| `status` | string | `completed` |
+
+Document ID: `mock-checkin-002`
+
+| Field | Type | Value |
+|-------|------|-------|
+| `id` | string | `mock-checkin-002` |
+| `studentId` | string | `6731503088` |
+| `sessionId` | string | `MAD-W07-2026` |
+| `checkInTime` | string | `2026-02-27T09:00:00` |
+| `checkOutTime` | string | `2026-02-27T11:00:00` |
+| `previousTopic` | string | `AI Tools for Mobile` |
+| `expectedTopic` | string | `Backend & API Design` |
+| `learningSummary` | string | `Explored Copilot for Flutter development` |
+| `classFeedback` | string | `Really helpful for project setup` |
+| `moodBefore` | number | `5` |
+| `checkInLat` | number | `20.0454` |
+| `checkInLng` | number | `99.8923` |
+| `checkOutLat` | number | `20.0454` |
+| `checkOutLng` | number | `99.8923` |
+| `status` | string | `completed` |
 
 ### QR Code for Demo
-Generate a QR code at [qr-code-generator.com](https://www.qr-code-generator.com) with this exact text:
+Generate at [qr-code-generator.com](https://www.qr-code-generator.com) with exact text:
 ```
 CLASSPULSE-MAD-W07-2026
 ```
-Print or display on screen to scan during demo.
 
 ---
 
@@ -62,19 +102,11 @@ Print or display on screen to scan during demo.
 **File:** `lib/services/location_service.dart`  
 **Package:** `geolocator: ^12.0.0`
 
-### Responsibility
-- Request location permission
-- Return current GPS coordinates as `GpsLocation`
-- Handle permission denied and GPS disabled gracefully
-
 ### Method Contract
 
 ```dart
 class LocationService {
-  /// Requests permission if not granted, then returns current GPS location.
-  /// Throws [LocationException] if permission denied or GPS disabled.
   Future<GpsLocation> getCurrentLocation() async {
-    // 1. Check & request permission
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
@@ -83,21 +115,16 @@ class LocationService {
         permission == LocationPermission.deniedForever) {
       throw LocationException('Location permission denied.');
     }
-
-    // 2. Check if GPS is enabled
     final bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
       throw LocationException('Location services are disabled.');
     }
-
-    // 3. Get position with timeout
     final position = await Geolocator.getCurrentPosition(
       desiredAccuracy: LocationAccuracy.high,
     ).timeout(
       const Duration(seconds: 10),
       onTimeout: () => throw LocationException('Location request timed out.'),
     );
-
     return GpsLocation(
       latitude: position.latitude,
       longitude: position.longitude,
@@ -106,39 +133,12 @@ class LocationService {
   }
 }
 
-/// Custom exception for location errors
 class LocationException implements Exception {
   final String message;
   const LocationException(this.message);
-  
   @override
-  String toString() => 'LocationException: \$message';
+  String toString() => 'LocationException: $message';
 }
-```
-
-### Error States to Handle in UI
-| Error | Message to Show User |
-|-------|---------------------|
-| Permission denied | "Location permission required. Please enable in settings." |
-| GPS disabled | "Please enable GPS to check in." |
-| Timeout | "Could not get location. Please try again." |
-
-### Required pubspec.yaml
-```yaml
-dependencies:
-  geolocator: ^12.0.0
-```
-
-### Required Permissions
-**Android** (`android/app/src/main/AndroidManifest.xml`):
-```xml
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-```
-**iOS** (`ios/Runner/Info.plist`):
-```xml
-<key>NSLocationWhenInUseUsageDescription</key>
-<string>ClassPulse needs your location to verify class attendance.</string>
 ```
 
 ---
@@ -148,121 +148,35 @@ dependencies:
 **File:** `lib/services/qr_service.dart`  
 **Package:** `mobile_scanner: ^5.0.0`
 
-### Responsibility
-- Open camera for QR scanning
-- Parse raw QR string to extract `sessionId`
-- Validate QR belongs to ClassPulse format
-- Provide mock QR fill for demo/debug purposes
-
 ### QR Code Format
-
-Expected QR string format:
 ```
 CLASSPULSE-{sessionId}
 ```
-Example:
-```
-CLASSPULSE-MAD-W07-2026
-```
-
-> **AI Instruction:** QR codes contain plain strings in the format `CLASSPULSE-{sessionId}`.
-> Do NOT expect JSON. Do NOT invent other formats.
+Example: `CLASSPULSE-MAD-W07-2026`
 
 ### Method Contract
 
 ```dart
 class QRService {
-  /// Parses a raw QR scan result string and extracts the sessionId.
-  /// Returns sessionId string if valid ClassPulse QR.
-  /// Throws [QRException] if format is invalid.
   String parseQRResult(String rawValue) {
     const prefix = 'CLASSPULSE-';
     if (!rawValue.startsWith(prefix)) {
       throw QRException('Invalid QR code. Not a ClassPulse session QR.');
     }
     final sessionId = rawValue.substring(prefix.length).trim();
-    if (sessionId.isEmpty) {
-      throw QRException('QR code contains no session ID.');
-    }
+    if (sessionId.isEmpty) throw QRException('QR code contains no session ID.');
     return sessionId;
   }
 
-  /// Returns mock session ID for demo/debug without real QR scan.
-  /// ONLY use this for testing. Remove before production.
   String getMockSessionId() => 'MAD-W07-2026';
 }
 
-/// Custom exception for QR errors
 class QRException implements Exception {
   final String message;
   const QRException(this.message);
-
   @override
-  String toString() => 'QRException: \$message';
+  String toString() => 'QRException: $message';
 }
-```
-
-### QR Scanner Widget Integration
-
-```dart
-// Usage in CheckInScreen / FinishClassScreen:
-MobileScanner(
-  controller: MobileScannerController(),
-  onDetect: (capture) {
-    final barcode = capture.barcodes.first;
-    final raw = barcode.rawValue;
-    if (raw != null) {
-      try {
-        final sessionId = qrService.parseQRResult(raw);
-        // update local state with sessionId
-      } catch (e) {
-        // show error snackbar
-      }
-    }
-  },
-);
-```
-
-### Mock QR Button (For Demo)
-> **AI Instruction:** Add a small **"Use Demo QR"** `TextButton` below the scanner area.
-> When tapped, it calls `qrService.getMockSessionId()` and sets `_sessionId` as if scanned.
-> Label it clearly as "Demo Mode" so the instructor knows it's intentional.
-
-```dart
-// In CheckInScreen and FinishClassScreen below the MobileScanner widget:
-TextButton.icon(
-  onPressed: () {
-    final mockId = QRService().getMockSessionId();
-    setState(() => _sessionId = mockId);
-  },
-  icon: const Icon(Icons.bug_report_outlined, size: 16),
-  label: const Text('Use Demo QR'),
-  style: TextButton.styleFrom(foregroundColor: AppColors.textSecondary),
-),
-```
-
-### Error States to Handle in UI
-| Error | Message to Show User |
-|-------|---------------------|
-| Invalid QR format | "This QR code is not a ClassPulse session code." |
-| Session ID mismatch (Finish only) | "QR code does not match your current session." |
-| Camera permission denied | "Camera permission required to scan QR code." |
-
-### Required pubspec.yaml
-```yaml
-dependencies:
-  mobile_scanner: ^5.0.0
-```
-
-### Required Permissions
-**Android** (`AndroidManifest.xml`):
-```xml
-<uses-permission android:name="android.permission.CAMERA" />
-```
-**iOS** (`Info.plist`):
-```xml
-<key>NSCameraUsageDescription</key>
-<string>ClassPulse needs camera access to scan class QR codes.</string>
 ```
 
 ---
@@ -274,7 +188,7 @@ dependencies:
 
 ### Responsibility
 - Fetch session info from Firestore `sessions` collection by sessionId
-- Validates that a session exists before allowing check-in
+- **READ ONLY** — never writes to `sessions`
 
 ### Method Contract
 
@@ -285,9 +199,6 @@ class SessionService {
   SessionService({FirebaseFirestore? firestore})
       : _firestore = firestore ?? FirebaseFirestore.instance;
 
-  /// Fetches session document from Firestore.
-  /// Returns session data map if found.
-  /// Throws [SessionException] if not found.
   Future<Map<String, dynamic>> getSession(String sessionId) async {
     try {
       final doc = await _firestore
@@ -295,9 +206,8 @@ class SessionService {
           .doc(sessionId)
           .get()
           .timeout(const Duration(seconds: 10));
-
       if (!doc.exists || doc.data() == null) {
-        throw SessionException('Session not found: \$sessionId');
+        throw SessionException('Session not found: $sessionId');
       }
       return doc.data()!;
     } catch (e) {
@@ -310,44 +220,92 @@ class SessionService {
 class SessionException implements Exception {
   final String message;
   const SessionException(this.message);
-
   @override
-  String toString() => 'SessionException: \$message';
+  String toString() => 'SessionException: $message';
 }
 ```
 
 ---
 
-## 4. CheckInService
+## 4. HiveHelper
 
-**File:** `lib/services/checkin_service.dart`  
-**Packages:** `sqflite: ^2.3.3`, `cloud_firestore: ^5.0.0`, `uuid: ^4.4.0`
+**File:** `lib/services/hive_helper.dart`  
+**Packages:** `hive: ^2.2.3`, `hive_flutter: ^1.1.0`
 
 ### Responsibility
-- Save new `CheckInRecord` to SQLite first, then Firestore
-- Update existing record at check-out
-- Retrieve all completed session records from SQLite
-- Generate UUID for new records
+- Manage Hive box as offline cache for `CheckInRecord`
+- Initialized once in `main()` via `Hive.initFlutter()`
 
-### Write Strategy: SQLite First, Then Firestore
-```
-User submits → Save to SQLite (immediate) → Save to Firestore (async, best-effort)
-                      │
-              If Firestore fails → log error, do NOT block user
+### Method Contract
+
+```dart
+class HiveHelper {
+  static const String _boxName = 'checkins';
+
+  static Future<void> init() async {
+    await Hive.initFlutter();
+    await Hive.openBox<Map>(_boxName);
+  }
+
+  static Box<Map> get _box => Hive.box<Map>(_boxName);
+
+  Future<void> saveRecord(CheckInRecord record) async {
+    await _box.put(record.id, record.toJson());
+  }
+
+  Future<void> updateRecord(CheckInRecord record) async {
+    await _box.put(record.id, record.toJson());
+  }
+
+  List<CheckInRecord> getAllRecords() {
+    return _box.values
+        .map((m) => CheckInRecord.fromJson(Map<String, dynamic>.from(m)))
+        .toList()
+      ..sort((a, b) => b.checkInTime.compareTo(a.checkInTime));
+  }
+}
 ```
 
-> **AI Instruction:** Firestore failures must NEVER crash the app or block the user.
-> SQLite is the source of truth for the UI. Firestore is cloud backup.
+### Initialize in main.dart
+```dart
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+  await HiveHelper.init();   // ← must be before runApp()
+  runApp(const ClassPulseApp());
+}
+```
+
+---
+
+## 5. CheckInService
+
+**File:** `lib/services/checkin_service.dart`  
+**Packages:** `hive_flutter`, `cloud_firestore: ^5.0.0`, `uuid: ^4.4.0`
+
+### Write Strategy: Hive First, Then Firestore
+```
+User submits → Save to Hive (immediate, offline-safe)
+                    └── Sync to Firestore (async, fire-and-forget)
+                              └── If Firestore fails → log error, do NOT block user
+```
+
+### Read Strategy: Firestore First, Hive Fallback
+```
+getAllRecords()
+    └── try Firestore checkins (source of truth)
+            └── on error / offline → return Hive cache
+```
 
 ### Method Contract
 
 ```dart
 class CheckInService {
-  final DatabaseHelper _db;
+  final HiveHelper _hive;
   final FirebaseFirestore _firestore;
 
-  CheckInService({DatabaseHelper? db, FirebaseFirestore? firestore})
-      : _db = db ?? DatabaseHelper.instance,
+  CheckInService({HiveHelper? hive, FirebaseFirestore? firestore})
+      : _hive = hive ?? HiveHelper(),
         _firestore = firestore ?? FirebaseFirestore.instance;
 
   Future<CheckInRecord> saveCheckIn({
@@ -371,7 +329,7 @@ class CheckInService {
       moodBefore: moodBefore,
       status: CheckInStatus.checkedIn,
     );
-    await _db.insertRecord(record);
+    await _hive.saveRecord(record);
     _syncToFirestore(record);
     return record;
   }
@@ -391,13 +349,31 @@ class CheckInService {
       learningSummary: learningSummary,
       classFeedback: classFeedback,
     );
-    await _db.updateRecord(updated);
+    await _hive.updateRecord(updated);
     _syncToFirestore(updated);
     return updated;
   }
 
+  /// Reads from Firestore first. Falls back to Hive if offline or error.
   Future<List<CheckInRecord>> getAllRecords() async {
-    return await _db.getAllRecords();
+    try {
+      final snapshot = await _firestore
+          .collection('checkins')
+          .orderBy('checkInTime', descending: true)
+          .get()
+          .timeout(const Duration(seconds: 10));
+      final records = snapshot.docs
+          .map((d) => CheckInRecord.fromJson(d.data()))
+          .toList();
+      // Cache to Hive for offline use
+      for (final r in records) {
+        await _hive.saveRecord(r);
+      }
+      return records;
+    } catch (e) {
+      debugPrint('Firestore read failed, using Hive cache: $e');
+      return _hive.getAllRecords();
+    }
   }
 
   void _syncToFirestore(CheckInRecord record) {
@@ -405,76 +381,7 @@ class CheckInService {
         .collection('checkins')
         .doc(record.id)
         .set(record.toJson())
-        .catchError((e) {
-      debugPrint('Firestore sync failed: \$e');
-    });
-  }
-}
-```
-
----
-
-## 5. DatabaseHelper (SQLite)
-
-**File:** `lib/services/database_helper.dart`
-
-```dart
-class DatabaseHelper {
-  static final DatabaseHelper instance = DatabaseHelper._init();
-  static Database? _database;
-
-  DatabaseHelper._init();
-
-  Future<Database> get database async {
-    if (_database != null) return _database!;
-    _database = await _initDB('classpulse.db');
-    return _database!;
-  }
-
-  Future<Database> _initDB(String fileName) async {
-    final dbPath = await getDatabasesPath();
-    final path = join(dbPath, fileName);
-    return await openDatabase(path, version: 1, onCreate: _createDB);
-  }
-
-  Future<void> _createDB(Database db, int version) async {
-    await db.execute('''
-      CREATE TABLE checkins (
-        id               TEXT PRIMARY KEY,
-        studentId        TEXT NOT NULL,
-        sessionId        TEXT NOT NULL,
-        checkInTime      TEXT NOT NULL,
-        checkInLat       REAL NOT NULL,
-        checkInLng       REAL NOT NULL,
-        previousTopic    TEXT NOT NULL,
-        expectedTopic    TEXT NOT NULL,
-        moodBefore       INTEGER NOT NULL,
-        status           TEXT NOT NULL DEFAULT 'checked_in',
-        checkOutTime     TEXT,
-        checkOutLat      REAL,
-        checkOutLng      REAL,
-        learningSummary  TEXT,
-        classFeedback    TEXT
-      )
-    ''');
-  }
-
-  Future<void> insertRecord(CheckInRecord record) async {
-    final db = await database;
-    await db.insert('checkins', record.toJson(),
-        conflictAlgorithm: ConflictAlgorithm.replace);
-  }
-
-  Future<void> updateRecord(CheckInRecord record) async {
-    final db = await database;
-    await db.update('checkins', record.toJson(),
-        where: 'id = ?', whereArgs: [record.id]);
-  }
-
-  Future<List<CheckInRecord>> getAllRecords() async {
-    final db = await database;
-    final maps = await db.query('checkins', orderBy: 'checkInTime DESC');
-    return maps.map((m) => CheckInRecord.fromJson(m)).toList();
+        .catchError((e) => debugPrint('Firestore sync failed: $e'));
   }
 }
 ```
@@ -483,16 +390,18 @@ class DatabaseHelper {
 
 ## AI Hallucination Warnings
 
-> ⚠️ Do NOT call `LocationService` or `QRService` inside `build()` or button callbacks directly.
+> ⚠️ Do NOT use `sqflite`, `DatabaseHelper`, or any SQLite code — it is removed.
 
-> ⚠️ Do NOT let Firestore errors crash the app. `_syncToFirestore()` is fire-and-forget.
+> ⚠️ Do NOT call any service inside `build()` or button `onPressed` directly.
+
+> ⚠️ Do NOT let Firestore errors crash the app. All Firestore calls are best-effort.
 
 > ⚠️ Do NOT use `Geolocator.getLastKnownPosition()` — always use `getCurrentPosition()`.
 
-> ⚠️ Do NOT invent QR formats. The only valid format is `CLASSPULSE-{sessionId}`.
-
-> ⚠️ Do NOT read history from Firestore — always read from SQLite (`getAllRecords()`).
+> ⚠️ Do NOT invent QR formats. Only valid format: `CLASSPULSE-{sessionId}`.
 
 > ⚠️ Always include `.timeout(Duration(seconds: 10))` on GPS and Firestore calls.
 
-> ⚠️ The `sessions` collection is READ ONLY from the app. Never write to it.
+> ⚠️ The `sessions` collection is READ ONLY. Never write to it.
+
+> ⚠️ Always call `HiveHelper.init()` in `main()` before `runApp()`.
