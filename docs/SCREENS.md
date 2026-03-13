@@ -20,11 +20,9 @@ Brand entry point. Displays logo and app name for 2 seconds, then auto-navigates
 ```
 ┌───────────────────────────┘
 │                           │
-│                           │
 │      [ Logo Icon ]        │  ← fade-in animation
 │       ClassPulse          │  ← AppTextStyles.displayLarge (white)
 │   Smart Class Check-in    │  ← AppTextStyles.bodyMedium (white 70%)
-│                           │
 │                           │
 └───────────────────────────┘
 ```
@@ -40,9 +38,6 @@ Brand entry point. Displays logo and app name for 2 seconds, then auto-navigates
 ### State
 - No Provider/state needed. Pure `StatefulWidget` with `initState` timer.
 
-### Components Used
-- No reusable atoms — self-contained screen.
-
 ---
 
 ## Screen 2: HomeScreen
@@ -51,67 +46,116 @@ Brand entry point. Displays logo and app name for 2 seconds, then auto-navigates
 **File:** `lib/features/home/home_screen.dart`
 
 ### Purpose
-Main hub. Shows current session status, BOTH action buttons, and session history list.
+Main hub. Three sections: CheckInCard, CheckOutCard, and Previous Sessions list.
 
 ### Layout
 ```
 ┌───────────────────────────┘
-│  AppBar: "ClassPulse"      │  ← AppTextStyles.titleLarge, no back button
+│  AppBar: "ClassPulse"      │  ← no back button
 ├───────────────────────────┤
 │                           │
-│  ┌───────────────────┘  │  ← StatusCard
-│  │  🟣 Ready to Check In │  │
-│  │  Today, 13 Mar 2026   │  │
+│  ┌───────────────────┘  │  ← CheckInCard
+│  │ 📚 Mobile App Dev    │  │     course name from Firestore
+│  │ Today, 13 Mar 2026   │  │     date
+│  │ [ ✔ Check In      ] │  │     ALWAYS enabled
 │  └───────────────────┘  │
 │                           │
-│  [ ✔ Check In          ]  │  ← Always ENABLED (primary button)
-│  [ 🏁 Check Out         ]  │  ← DIMMED when not checked in
+│  ┌───────────────────┘  │  ← CheckOutCard
+│  │ 📚 Mobile App Dev    │  │     same course name
+│  │ Status: In Progress  │  │     status text
+│  │ [ 🏁 Check Out     ] │  │     DIMMED if not checked in
+│  └───────────────────┘  │
 │                           │
-│  ─── Recent Sessions ───  │  ← Section label
-│  [ Session History List ] │  ← SessionHistoryItem atoms
+│  ─── Previous Sessions ──  │  ← section label
+│  [ SessionHistoryItem ]   │
+│  [ SessionHistoryItem ]   │
+│  "No sessions yet"        │  ← empty state
 │                           │
 └───────────────────────────┘
 ```
 
-### Button Logic
+---
 
-> **AI Instruction:** ALWAYS render BOTH buttons. Use `enabled` property to control interactivity.
-> Do NOT conditionally show/hide buttons. Do NOT use `Visibility` or `if` to toggle them.
+## HomeScreen Atoms
 
-| Button | Label | Color when enabled | When enabled | Navigates To |
-|--------|-------|-------------------|--------------|-------------|
-| Check In | "Check In" | `AppColors.primary` | **Always** | `/checkin` |
-| Check Out | "Check Out" | `AppColors.primary` | Only when `currentRecord != null && status == checkedIn` | `/finish` |
+### `CheckInCard`
+**File:** `lib/features/home/widgets/check_in_card.dart`
 
-**Check Out disabled appearance:**
-- Background: `AppColors.surfaceVariant`
-- Text: `AppColors.textSecondary`
-- `onPressed: null` (Flutter auto-dims when null)
-- Do NOT show tooltip or error — just visually dimmed
+- Props: `String courseName`, `String dateLabel`, `VoidCallback onCheckIn`
+- Always renders with **enabled** Check In button
+- Layout inside card:
+  - Row: `Icons.menu_book_rounded` + `courseName` (AppTextStyles.titleMedium)
+  - `dateLabel` (AppTextStyles.bodySmall, AppColors.textSecondary)
+  - Full-width primary `ActionButton` label "Check In", icon `Icons.check_circle_outline`
+- Card background: `AppColors.surface`
+- Border: 1px `AppColors.primary` with 30% opacity
 
-### Status Card States
+> **AI Instruction:** `courseName` is fetched from Firestore `sessions/MAD-W07-2026`.
+> It is passed DOWN as a prop from HomeScreen. Do NOT fetch Firestore inside this widget.
 
-| Status | Icon | Title | Card Background |
-|--------|------|-------|-----------------|
-| `null` (no session) | `🟣` | "Ready to Check In" | `AppColors.surface` |
-| `checkedIn` | `⏳` | "Class In Progress" | `AppColors.primaryLight` |
-| `completed` | `✅` | "Class Completed!" | `Color(0xFFE8F5E9)` |
+---
 
-### Session History List
-- Shows all past `CheckInRecord` where `status == completed`
-- Each item: `SessionHistoryItem` atom
-- Empty state: centered text "No sessions yet" in `AppTextStyles.bodyMedium`
-- Loaded from `CheckInService.getAllRecords()` in `initState`
+### `CheckOutCard`
+**File:** `lib/features/home/widgets/check_out_card.dart`
 
-### State (Provider)
-- Reads: `CheckInNotifier.currentRecord` (nullable `CheckInRecord`)
-- Reads: `CheckInNotifier.sessionHistory` (List<CheckInRecord>)
-- Calls: `CheckInNotifier.loadHistory()` on `initState`
+- Props: `String courseName`, `String statusLabel`, `VoidCallback? onCheckOut`
+- `onCheckOut` is `null` when user has NOT checked in — Flutter auto-dims the button
+- Layout inside card:
+  - Row: `Icons.menu_book_rounded` + `courseName` (AppTextStyles.titleMedium)
+  - `statusLabel` (AppTextStyles.bodySmall):
+    - Not checked in: "Check in first to enable" (AppColors.textSecondary)
+    - Checked in: "Class in progress" (AppColors.primary)
+  - Full-width `ActionButton` label "Check Out", icon `Icons.flag_rounded`
+    - `onPressed: onCheckOut` (null = dimmed automatically)
+- Card background: `AppColors.surface`
+- Border: 1px `AppColors.surfaceVariant`
 
-### Atoms Used
-- `StatusCard` — displays session state
-- `SessionHistoryItem` — one row per past session
-- `ActionButton` — reusable button atom used for both buttons
+> **AI Instruction:** `onCheckOut` is `null` when `currentRecord == null`.
+> Pass `() => context.go('/finish')` when `currentRecord != null`.
+
+---
+
+### `SessionHistoryItem`
+**File:** `lib/features/home/widgets/session_history_item.dart`
+
+- Props: `CheckInRecord record`
+- Layout (one row):
+  - Left: date + sessionId
+  - Right: mood emoji + green "Completed" chip
+- Uses `AppTextStyles.bodySmall`, `AppSpacing.sm`
+
+---
+
+## HomeScreen State & Data Flow
+
+```
+initState:
+  1. SessionService.getSession('MAD-W07-2026') → store courseName in local state
+  2. CheckInNotifier.loadHistory() → loads past records from SQLite
+
+build:
+  CheckInCard(
+    courseName: _courseName,       ← from Firestore (local state)
+    dateLabel: 'Today, 13 Mar',
+    onCheckIn: () => context.go('/checkin'),
+  )
+
+  CheckOutCard(
+    courseName: _courseName,
+    statusLabel: currentRecord != null ? 'Class in progress' : 'Check in first to enable',
+    onCheckOut: currentRecord != null ? () => context.go('/finish') : null,
+  )
+
+  ListView of sessionHistory
+```
+
+### State Variables (HomeScreen)
+- `_courseName` (String) — loaded from Firestore in `initState`, default `'Loading...'`
+- `_isLoadingCourse` (bool) — shows shimmer/spinner in card while fetching
+- Reads from Provider: `CheckInNotifier.currentRecord`, `CheckInNotifier.sessionHistory`
+
+> **AI Instruction:** If `SessionService.getSession()` fails, set `_courseName = 'Mobile App Dev'` as fallback.
+> Never crash the screen if Firestore is unavailable.
 
 ---
 
@@ -120,9 +164,6 @@ Main hub. Shows current session status, BOTH action buttons, and session history
 **Route:** `/checkin`  
 **File:** `lib/features/checkin/check_in_screen.dart`
 
-### Purpose
-Captures GPS location, QR scan, and pre-class reflection. Creates a new `CheckInRecord`.
-
 ### Layout
 ```
 ┌───────────────────────────┘
@@ -130,42 +171,33 @@ Captures GPS location, QR scan, and pre-class reflection. Creates a new `CheckIn
 ├───────────────────────────┤
 │  ── Step 1: Location ──   │
 │  [ 📍 Get My Location ]    │  ← Outlined button → LocationService
-│  "Lat: 20.04 | Lng: 99.89" │  ← Shows after capture
+│  "Lat: 20.04 | Lng: 99.89" │
 │                           │
 │  ── Step 2: QR Code ───   │
-│  [ 📷 Scan QR Code ]      │  ← Outlined button → opens QR scanner
-│  "Session: MAD-W07"       │  ← Shows sessionId after scan
-│  [ Use Demo QR ]          │  ← TextButton for demo (calls getMockSessionId)
+│  [ 📷 Scan QR Code ]      │
+│  "Session: MAD-W07 ✓"    │
+│  [ Use Demo QR ]          │  ← TextButton (demo only)
 │                           │
 │  ── Step 3: Reflection ──  │
-│  [ Previous Topic input ]  │  ← TextFormField
-│  [ Expected Topic input ]  │  ← TextFormField
-│  [ Mood Selector ]         │  ← MoodSelector atom (5 tiles)
+│  [ Previous Topic input ]  │
+│  [ Expected Topic input ]  │
+│  [ Mood Selector ]         │
 │                           │
-│  [ Submit Check In ]       │  ← Primary button (disabled until all steps done)
+│  [ Submit Check In ]       │  ← disabled until all steps done
 └───────────────────────────┘
 ```
 
-### Step Completion Rules
-- Submit button is **disabled** until: GPS captured AND QR scanned AND both text fields filled AND mood selected
-- GPS status shows inline below the button: loading spinner → coordinates text
-- QR status shows inline: "Tap to scan" → "Session ID: [value] ✓"
-
 ### On Submit
-1. Creates `CheckInRecord` with all captured data
-2. Calls `CheckInService.saveCheckIn(record)`
-3. Updates `CheckInNotifier.currentRecord`
-4. Navigates: `context.go(AppRoutes.home.path)`
+1. Calls `CheckInService.saveCheckIn(...)`
+2. Updates `CheckInNotifier.currentRecord`
+3. Navigates: `context.go(AppRoutes.home.path)`
 
-### State (Provider)
-- Local: `_gpsLocation` (GpsLocation?), `_sessionId` (String?), `_moodScore` (int?)
-- Local: `_formKey` (GlobalKey<FormState>)
+### State
+- Local: `_gpsLocation`, `_sessionId`, `_moodScore`, `_formKey`
 - Writes to: `CheckInNotifier`
 
 ### Atoms Used
-- `StepSectionLabel` — "Step 1: Location" headers
-- `MoodSelector` — 5 emoji mood tiles
-- `StatusIndicator` — inline GPS/QR capture feedback
+- `StepSectionLabel`, `MoodSelector`, `StatusIndicator`
 
 ---
 
@@ -174,107 +206,79 @@ Captures GPS location, QR scan, and pre-class reflection. Creates a new `CheckIn
 **Route:** `/finish`  
 **File:** `lib/features/checkout/finish_class_screen.dart`
 
-### Purpose
-Captures QR re-scan + GPS + post-class reflection. Updates existing `CheckInRecord` to `completed`.
-
 ### Layout
 ```
 ┌───────────────────────────┘
 │  AppBar: "Finish Class"    │  ← back button disabled
 ├───────────────────────────┤
 │  ── Step 1: QR Code ───   │
-│  [ 📷 Scan QR Code ]      │  ← Must match check-in sessionId
-│  "Session: MAD-W07 ✓"    │
-│  [ Use Demo QR ]          │  ← TextButton for demo
+│  [ 📷 Scan QR Code ]      │  ← must match check-in sessionId
+│  [ Use Demo QR ]          │
 │                           │
 │  ── Step 2: Location ──   │
-│  [ 📍 Get My Location ]    │  ← Outlined button → LocationService
-│  "Lat: 20.04 | Lng: 99.89" │
+│  [ 📍 Get My Location ]    │
 │                           │
 │  ── Step 3: Reflection ──  │
-│  [ What I learned input ]  │  ← TextFormField (multiline, max 3 lines)
-│  [ Feedback input ]        │  ← TextFormField (multiline, max 3 lines)
+│  [ What I learned input ]  │
+│  [ Feedback input ]        │
 │                           │
-│  [ Complete Class ]        │  ← Primary button (disabled until all done)
+│  [ Complete Class ]        │  ← disabled until all done
 └───────────────────────────┘
 ```
 
-### Step Completion Rules
-- Submit button **disabled** until: QR scanned AND GPS captured AND both text fields filled
-- QR must match `currentRecord.sessionId` — show error snackbar if mismatch
-
 ### On Submit
-1. Calls `currentRecord.copyWith(...)` with checkout data
-2. Calls `CheckInService.saveCheckOut(updatedRecord)`
-3. Updates `CheckInNotifier.currentRecord` to null
-4. Adds record to `sessionHistory`
-5. Navigates: `context.go(AppRoutes.home.path)`
+1. Calls `CheckInService.saveCheckOut(...)`
+2. Sets `CheckInNotifier.currentRecord` to null
+3. Adds to `sessionHistory`
+4. Navigates: `context.go(AppRoutes.home.path)`
 
-### State (Provider)
-- Reads: `CheckInNotifier.currentRecord` (to get sessionId for QR validation)
+### State
+- Reads: `CheckInNotifier.currentRecord`
 - Local: `_gpsLocation`, `_sessionId`, `_formKey`
-- Writes to: `CheckInNotifier`
 
 ### Atoms Used
-- `StepSectionLabel`
-- `StatusIndicator`
+- `StepSectionLabel`, `StatusIndicator`
 
 ---
 
-## Reusable Atoms (Shared Components)
+## Shared Atoms
 
-> **AI Instruction (Week 5):** Build atoms first, then assemble into screens.
-> Each atom is a single file. No atom file exceeds 100 lines.
-
-### `StatusCard`
-**File:** `lib/features/home/widgets/status_card.dart`
-- Props: `CheckInStatus? status`
-- Renders title, icon, and background color based on status
-- Uses `AppRadius.lg`, `AppSpacing.md`
-
-### `SessionHistoryItem`
-**File:** `lib/features/home/widgets/session_history_item.dart`
-- Props: `CheckInRecord record`
-- Shows: date, topic, mood emoji, completion chip
-- One row, tappable (no navigation for MVP)
+> **AI Instruction:** Build atoms first, then assemble into screens. No atom file exceeds 100 lines.
 
 ### `ActionButton`
 **File:** `lib/shared/widgets/action_button.dart`
 - Props: `String label`, `IconData icon`, `VoidCallback? onPressed`, `bool isPrimary`
-- When `onPressed == null`: Flutter auto-dims (disabled state)
-- `isPrimary: true` → filled style with `AppColors.primary`
-- `isPrimary: false` → outlined style
-- Used for both Check In and Check Out buttons on HomeScreen
+- `onPressed == null` → Flutter auto-dims
+- `isPrimary: true` → filled `AppColors.primary`
+- `isPrimary: false` → outlined
 
 ### `MoodSelector`
 **File:** `lib/shared/widgets/mood_selector.dart`
 - Props: `int? selectedScore`, `ValueChanged<int> onSelected`
-- Renders 5 `MoodTile` atoms from `MoodOption.all`
-- Selected tile: `AppColors.primaryLight` border `AppColors.primary`
-- Unselected tile: `AppColors.surfaceVariant`
+- 5 emoji mood tiles
 
 ### `StepSectionLabel`
 **File:** `lib/shared/widgets/step_section_label.dart`
 - Props: `String stepNumber`, `String title`, `bool isComplete`
-- Shows step number chip + label + checkmark if complete
 
 ### `StatusIndicator`
 **File:** `lib/shared/widgets/status_indicator.dart`
 - Props: `bool isLoading`, `bool isSuccess`, `String? message`
-- Shows: spinner (loading) → success icon + message (done) → idle state
 
 ---
 
 ## AI Hallucination Warnings
 
-> ⚠️ Do NOT put GPS or QR logic inside `build()` or button `onPressed` inline. Delegate to services.
+> ⚠️ HomeScreen has THREE sections: `CheckInCard`, `CheckOutCard`, `Previous Sessions list`. Do NOT merge them.
 
-> ⚠️ ALWAYS render BOTH buttons on HomeScreen. Use `onPressed: null` to disable Check Out, not `Visibility` or `if`.
+> ⚠️ `courseName` is fetched ONCE in HomeScreen `initState` via `SessionService`. Pass it as a prop to both cards.
 
-> ⚠️ Do NOT create a separate screen for history — it is a list section on HomeScreen.
+> ⚠️ `CheckOutCard` button uses `onPressed: null` when not checked in — never use `Visibility` or `if` to hide it.
+
+> ⚠️ Check In button is ALWAYS enabled.
+
+> ⚠️ Do NOT fetch Firestore inside widget `build()` methods.
 
 > ⚠️ Do NOT add a bottom navigation bar.
 
-> ⚠️ `FinishClassScreen` must validate QR matches `currentRecord.sessionId` before enabling submit.
-
-> ⚠️ Check In button is ALWAYS enabled — the user can check in anytime for demo purposes.
+> ⚠️ If Firestore fails, fallback `_courseName = 'Mobile App Dev'` — never crash the screen.
